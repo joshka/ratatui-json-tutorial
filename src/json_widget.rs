@@ -1,331 +1,244 @@
 use std::io;
 
 use color_eyre::eyre::Context;
-use ratatui::prelude::*;
-use serde_json::{Map, Value};
+use itertools::{Itertools, Position};
+use ratatui::{prelude::*, widgets::Paragraph};
+use serde_json::{Map, Number, Value};
 
 #[derive(Default)]
 pub struct JsonWidget {
+    style: JsonWidgetStyle,
     json: Value,
+    edit_index: usize,
+    show_debug: bool,
 }
 
 impl JsonWidget {
-    pub fn load<R: io::Read>(&mut self, file: R) -> color_eyre::Result<()> {
-        self.json = serde_json::from_reader(file).wrap_err("failed to read file")?;
+    pub fn new(value: Value) -> Self {
+        Self {
+            style: JsonWidgetStyle::default(),
+            json: value,
+            edit_index: 0,
+            show_debug: false,
+        }
+    }
+
+    pub fn load<R: io::Read>(&mut self, reader: R) -> color_eyre::Result<()> {
+        self.json = serde_json::from_reader(reader).wrap_err("failed to read file")?;
         Ok(())
     }
+
+    pub fn next_edit(&mut self) {
+        self.edit_index = self.edit_index.saturating_add(1);
+    }
+
+    pub fn prev_edit(&mut self) {
+        self.edit_index = self.edit_index.saturating_sub(1);
+    }
 }
 
-const PUNCTUATION_STYLE: Style = Style::new().add_modifier(Modifier::BOLD).fg(Color::White);
-const KEY_STYLE: Style = Style::new().add_modifier(Modifier::BOLD).fg(Color::Blue);
-const STRING_STYLE: Style = Style::new().fg(Color::Green);
-const NUMBER_STYLE: Style = Style::new().fg(Color::Yellow);
-const BOOLEAN_STYLE: Style = Style::new().fg(Color::Cyan);
-const NULL_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
+#[derive(Debug, Clone, Copy)]
+pub struct JsonWidgetStyle {
+    pub punctuation: Style,
+    pub key: Style,
+    pub string: Style,
+    pub number: Style,
+    pub boolean: Style,
+    pub null: Style,
+}
 
+impl Default for JsonWidgetStyle {
+    fn default() -> Self {
+        Self {
+            punctuation: (Color::White, Modifier::BOLD).into(),
+            key: (Color::Blue, Modifier::BOLD).into(),
+            string: Color::Green.into(),
+            number: Color::Yellow.into(),
+            boolean: Color::Cyan.into(),
+            null: (Color::White, Modifier::DIM).into(),
+        }
+    }
+}
+
+// TODO make this a stateful widget as the edit index needs to be mutated based on the number of
+// items in the json
 impl Widget for &JsonWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // this will be a recursive function that will render the json value
-        // to the buffer. It will be called with the root value and the root
-        // rect, and will recursively call itself with the subvalues and subrects
-        // as it goes down the json tree.
-        render_value(&self.json, area, buf);
-    }
-}
+        let debug_width = bool::from(self.show_debug) as u16; // 0 or 1
+        let [left, right] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Fill(debug_width)]).areas(area);
+        let mut visitor = TextVisitor::new(self.style);
+        visitor.visit_value(&self.json);
+        let debug = format!("{:#?}", visitor.edit_positions);
+        Text::raw(debug).render(right, buf);
 
-fn render_value(value: &Value, area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    if area.is_empty() {
-        return;
-    }
-    match value {
-        Value::Null => render_null(area, buf),
-        Value::Bool(b) => render_bool(*b, area, buf),
-        Value::Number(num) => render_number(num, area, buf),
-        Value::String(s) => render_string(s, area, buf),
-        Value::Array(arr) => render_array(&arr, area, buf),
-        Value::Object(map) => render_object(&map, area, buf),
-    }
-}
-
-fn render_null(area: Rect, buf: &mut Buffer) {
-    Span::styled("null", NULL_STYLE).render(area, buf);
-}
-
-fn render_bool(b: bool, area: Rect, buf: &mut Buffer) {
-    let content = if b { "true" } else { "false" };
-    Span::styled(content, BOOLEAN_STYLE).render(area, buf);
-}
-
-fn render_number(num: &serde_json::Number, area: Rect, buf: &mut Buffer) {
-    let content = format!("{}", num);
-    Span::styled(content, NUMBER_STYLE).render(area, buf);
-}
-
-fn render_string(s: &str, area: Rect, buf: &mut Buffer) {
-    // currently single line, but this should be transitioned to multi-line and support wrapping
-    let content = format!("\"{}\"", s);
-    Span::styled(content, STRING_STYLE).render(area, buf);
-}
-
-/// Render an array by rendering the opening bracket on a line by itself, then
-/// rendering each value in the array on a separate line, and finally rendering
-/// the closing bracket on a line by itself.
-///
-/// Each value in the array will be rendered indented by 2 spaces.
-/// Each value may take up multiple lines, so the area will be split into lines
-/// based on the height of the value.
-/// The first element of the array will be rendered on the line after the opening
-/// bracket, and each subsequent element will be rendered on the line after the
-/// previous element.
-fn render_array(arr: &[Value], area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    if area.is_empty() {
-        return;
-    }
-    let opening_bracket = Span::styled("[", PUNCTUATION_STYLE);
-    let closing_bracket = Span::styled("]", PUNCTUATION_STYLE);
-    opening_bracket.render(area, buf);
-    if arr.is_empty() {
-        // if the array is empty, render the closing bracket on the same line as the opening bracket
-        let area = Rect::new(area.left() + 1, area.top(), area.width - 1, 1);
-        closing_bracket.render(area, buf);
-        return;
-    }
-    let mut current_line = area.top() + 1;
-    for value in arr {
-        let value_height = height_of_value(value);
-        let value_area = Rect::new(area.left() + 2, current_line, area.width - 2, value_height);
-        render_value(value, value_area, buf);
-        current_line += value_height;
-    }
-    let closing_bracket_area = Rect::new(area.left(), current_line, area.width, 1);
-    closing_bracket.render(closing_bracket_area, buf);
-}
-
-fn render_object(obj: &Map<String, Value>, area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    if area.is_empty() {
-        return;
-    }
-    let opening_brace = Span::styled("{", PUNCTUATION_STYLE);
-    let closing_brace = Span::styled("}", PUNCTUATION_STYLE);
-    opening_brace.render(area, buf);
-    if obj.is_empty() {
-        // if the object is empty, render the closing brace on the same line as the opening brace
-        let area = Rect::new(area.left() + 1, area.top(), area.width - 1, 1);
-        closing_brace.render(area, buf);
-        return;
-    }
-    let mut current_line = area.top() + 1;
-    for (key, value) in obj {
-        let key_area = Rect::new(area.left() + 2, current_line, area.width - 2, 1);
-        let key_span = Span::styled(format!("\"{}\"", key), KEY_STYLE);
-        let key_line = Line::from(vec![key_span, Span::styled(": ", PUNCTUATION_STYLE)]);
-        let key_width = key_line.width() as u16;
-        key_line.render(key_area, buf);
-        let value_height = height_of_value(value);
-        let value_area = Rect::new(
-            area.left() + key_width + 2,
-            current_line,
-            area.width - key_width - 2,
-            value_height,
-        );
-        render_value(value, value_area, buf);
-        current_line += value_height;
-    }
-    let closing_brace_area = Rect::new(area.left(), current_line, area.width, 1);
-    closing_brace.render(closing_brace_area, buf);
-}
-
-fn height_of_value(value: &Value) -> u16 {
-    match value {
-        Value::Null => 1,
-        Value::Bool(_) => 1,
-        Value::Number(_) => 1,
-        Value::String(s) => s.lines().count() as u16,
-        Value::Array(arr) => {
-            if arr.is_empty() {
-                1
-            } else {
-                arr.iter().map(height_of_value).sum::<u16>() + 2
-            }
+        if let Some(span) = visitor.get_span_mut(self.edit_index) {
+            span.style = span.style.add_modifier(Modifier::REVERSED);
         }
-        Value::Object(map) => {
-            if map.is_empty() {
-                1
-            } else {
-                map.values().map(height_of_value).sum::<u16>() + 2
-            }
+        let index = self
+            .edit_index
+            .clamp(0, visitor.edit_positions.len().saturating_sub(1));
+        let y = visitor
+            .edit_positions
+            .get(index)
+            .map(|pos| pos.line_index as u16)
+            .unwrap_or(0)
+            .saturating_sub(left.height - 2)
+            .clamp(0, left.height);
+        Paragraph::new(visitor.text)
+            .scroll((y, 0))
+            .render(left, buf);
+    }
+}
+
+trait Visit {
+    fn visit_value(&mut self, value: &Value) {
+        match value {
+            Value::Null => self.visit_null(),
+            Value::Bool(b) => self.visit_bool(*b),
+            Value::Number(num) => self.visit_number(num),
+            Value::String(s) => self.visit_string(s),
+            Value::Array(arr) => self.visit_array(arr),
+            Value::Object(map) => self.visit_object(map),
         }
     }
+    fn visit_null(&mut self);
+    fn visit_bool(&mut self, b: bool);
+    fn visit_number(&mut self, num: &Number);
+    fn visit_string(&mut self, s: &str);
+    fn visit_array(&mut self, arr: &[Value]);
+    fn visit_object(&mut self, map: &Map<String, Value>);
+    fn visit_key_value(&mut self, key: &str, value: &Value);
+    fn visit_key(&mut self, key: &str);
 }
 
-#[cfg(test)]
-mod tests {
-    use rstest::{fixture, rstest};
-    use serde_json::{json, Number};
+#[derive(Debug)]
+struct TextVisitor<'a> {
+    style: JsonWidgetStyle,
+    indent: usize,
+    pub text: Text<'a>,
+    pub edit_positions: Vec<EditPosition>,
+}
 
-    use super::*;
+#[derive(Debug, Clone, Copy)]
+pub struct EditPosition {
+    line_index: usize,
+    span_index: usize,
+}
 
-    /// A 10x1 buffer
-    #[fixture]
-    fn small_buf() -> Buffer {
-        Buffer::empty(Rect::new(0, 0, 10, 1))
+impl<'a> TextVisitor<'a> {
+    fn new(style: JsonWidgetStyle) -> Self {
+        Self {
+            style,
+            text: Text::raw(""),
+            indent: 0,
+            edit_positions: Vec::new(),
+        }
     }
 
-    /// A 20x5 buffer
-    #[fixture]
-    fn medium_buf() -> Buffer {
-        Buffer::empty(Rect::new(0, 0, 20, 5))
+    fn incr_indent(&mut self) {
+        self.indent += 2;
     }
 
-    /// A 20x10 buffer
-    #[fixture]
-    fn large_buf() -> Buffer {
-        Buffer::empty(Rect::new(0, 0, 20, 10))
+    fn decr_indent(&mut self) {
+        self.indent -= 2;
     }
 
-    #[rstest]
-    #[case(json!(null), "null      ")]
-    #[case(json!(true), "true      ")]
-    #[case(json!(false), "false     ")]
-    #[case(json!(42), "42        ")]
-    #[case(json!(-1), "-1        ")]
-    #[case(json!(42.0), "42.0      ")]
-    #[case(json!(-1.0), "-1.0      ")]
-    #[case(json!("Hello, World!"), "Hello, Wor")]
-    fn render_value_null(mut small_buf: Buffer, #[case] value: Value, #[case] expected: &str) {
-        render_value(&value, small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec![expected]));
+    fn push_line(&mut self) {
+        self.text.push_line(" ".repeat(self.indent).into())
     }
 
-    #[rstest]
-    fn render_null(mut small_buf: Buffer) {
-        super::render_null(small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["null      "]));
+    fn push_value<S: ToString>(&mut self, value: S, style: Style) {
+        let span = Span::styled(value.to_string(), style);
+        self.text.push_span(span);
+        self.push_edit_position();
     }
 
-    #[rstest]
-    fn render_bool(mut small_buf: Buffer) {
-        super::render_bool(true, small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["true      "]));
+    fn push_key(&mut self, key: &str) {
+        let span = Span::styled(format!("\"{}\"", key), self.style.key);
+        self.text.push_span(span);
+        self.push_edit_position();
     }
 
-    #[rstest]
-    fn render_number(mut small_buf: Buffer) {
-        let num = Number::from_f64(42.0).unwrap();
-        super::render_number(&num, small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["42.0      "]));
+    fn push_punctuation(&mut self, punctuation: &'static str) {
+        let span = Span::styled(punctuation, self.style.punctuation);
+        self.text.push_span(span);
     }
 
-    #[rstest]
-    fn render_string(mut small_buf: Buffer) {
-        super::render_string("Hello, World!", small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["Hello, Wor"]));
+    fn push_edit_position(&mut self) {
+        self.edit_positions.push(EditPosition {
+            line_index: self.text.lines.len() - 1,
+            span_index: self.text.lines.last().unwrap().spans.len() - 1,
+        });
     }
 
-    #[rstest]
-    fn render_array_empty(mut small_buf: Buffer) {
-        let arr = vec![];
-        super::render_array(&arr, small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["[]        "]));
+    fn get_span_mut(&mut self, index: usize) -> Option<&mut Span<'a>> {
+        let position = self.edit_positions.get(index)?;
+        let line = self.text.lines.get_mut(position.line_index)?;
+        let span = line.spans.get_mut(position.span_index)?;
+        Some(span)
+    }
+}
+
+impl Visit for TextVisitor<'_> {
+    fn visit_null(&mut self) {
+        self.push_value("null", self.style.null);
     }
 
-    #[rstest]
-    fn render_array(mut medium_buf: Buffer) {
-        let arr = vec![json!(null), json!(true), json!(42)];
-        super::render_array(&arr, medium_buf.area, &mut medium_buf);
-        assert_eq!(
-            medium_buf,
-            Buffer::with_lines(vec![
-                "[                   ",
-                "  null              ",
-                "  true              ",
-                "  42                ",
-                "]                   ",
-            ])
-        );
+    fn visit_bool(&mut self, b: bool) {
+        self.push_value(b, self.style.boolean);
     }
 
-    #[rstest]
-    fn render_array_nested(mut medium_buf: Buffer) {
-        let arr = vec![json!([42])];
-        super::render_array(&arr, medium_buf.area, &mut medium_buf);
-        assert_eq!(
-            medium_buf,
-            Buffer::with_lines(vec![
-                "[                   ",
-                "  [                 ",
-                "    42              ",
-                "  ]                 ",
-                "]                   ",
-            ])
-        );
+    fn visit_number(&mut self, num: &Number) {
+        self.push_value(num, self.style.number);
     }
 
-    #[rstest]
-    fn render_object_empty(mut small_buf: Buffer) {
-        let obj = Map::new();
-        super::render_object(&obj, small_buf.area, &mut small_buf);
-        assert_eq!(small_buf, Buffer::with_lines(vec!["{}        "]));
+    fn visit_string(&mut self, s: &str) {
+        self.push_value(format!("\"{}\"", s), self.style.string);
     }
 
-    #[rstest]
-    fn render_object(mut medium_buf: Buffer) {
-        let mut obj = Map::default();
-        obj.insert("key1".into(), json!(42));
-        obj.insert("key2".into(), json!(true));
-        super::render_object(&obj, medium_buf.area, &mut medium_buf);
-        assert_eq!(
-            medium_buf,
-            Buffer::with_lines(vec![
-                "{                   ",
-                "  key1: 42          ",
-                "  key2: true        ",
-                "}                   ",
-                "                    ",
-            ])
-        );
+    fn visit_array(&mut self, arr: &[Value]) {
+        self.push_punctuation("[");
+        self.incr_indent();
+        for (position, value) in arr.iter().with_position() {
+            if position == Position::First {
+                self.push_punctuation(", ");
+            }
+            self.push_line();
+            self.visit_value(value);
+        }
+        self.decr_indent();
+        if !arr.is_empty() {
+            self.push_line();
+        }
+        self.push_punctuation("]");
     }
 
-    #[rstest]
-    #[case(json!(null), 1)]
-    #[case(json!(true), 1)]
-    #[case(json!(42), 1)]
-    #[case(json!(-1), 1)]
-    #[case(json!(42.0), 1)]
-    #[case(json!(-1.0), 1)]
-    #[case(json!("Hello, World!"), 1)]
-    // empty array is 1 line
-    #[case(json!([]), 1)]
-    // other arrays always have a line for the opening bracket, a line for the closing bracket,
-    // and a line for each element
-    #[case(json!([null]), 3)]
-    #[case(json!([true]), 3)]
-    #[case(json!([42]), 3)]
-    #[case(json!([42, 42]), 4)]
-    #[case(json!([42, 42, 42]), 5)]
-    #[case(json!([[]]), 3)]
-    #[case(json!([[42]]), 5)]
-    #[case(json!([[42], [42]]), 8)]
-    #[case(json!({}), 1)]
-    #[case(json!({"key": null}), 3)]
-    #[case(json!({"key": true}), 3)]
-    #[case(json!({"key": 42}), 3)]
-    #[case(json!({"key": []}), 3)]
-    #[case(json!({"key1": 42, "key2": 42}), 4)]
-    #[case(json!({"key1": 42, "key2": []}), 4)]
-    #[case(json!({"key1": 42, "key2": [42]}), 6)]
-    #[case(json!({"key1": 42, "key2": [42, 42]}), 7)]
-    #[case(json!({"key1": 42, "key2": [42, 42, 42]}), 8)]
-    #[case(json!({"key1": 42, "key2": {"key3": 42}}), 6)]
-    fn height_of_value(#[case] value: Value, #[case] expected: u16) {
-        assert_eq!(
-            super::height_of_value(&value),
-            expected,
-            "value: {:?}",
-            value
-        );
+    fn visit_object(&mut self, map: &Map<String, Value>) {
+        self.push_punctuation("{");
+        self.incr_indent();
+        for (position, (key, value)) in map.iter().with_position() {
+            if position != Position::First {
+                self.push_punctuation(", ");
+            }
+            self.visit_key_value(key, value);
+        }
+        self.decr_indent();
+        // only add a newline if there are any key-value pairs in the object
+        if !map.is_empty() {
+            self.push_line();
+        }
+        self.push_punctuation("}");
+    }
+
+    fn visit_key_value(&mut self, key: &str, value: &Value) {
+        self.push_line();
+        self.visit_key(key);
+        self.push_punctuation(": ");
+        self.visit_value(value);
+    }
+
+    fn visit_key(&mut self, key: &str) {
+        self.push_key(key);
     }
 }

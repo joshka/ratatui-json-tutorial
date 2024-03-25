@@ -9,5 +9,7 @@
     "city": "Los Angeles",
     "state": "CA",
     "zip": "90001"
-  }
+  },
+  "empty_object": {},
+  "empty_array": []
 }

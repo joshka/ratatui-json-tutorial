@@ -70,10 +70,10 @@ impl JsonEditorApp {
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> color_eyre::Result<bool> {
-        match event.code {
-            KeyCode::Char('q') => {
-                return Ok(true);
-            }
+        match (event.modifiers, event.code) {
+            (_, KeyCode::Char('q')) => return Ok(true),
+            (_, KeyCode::Char('j')) => self.json.next_edit(),
+            (_, KeyCode::Char('k')) => self.json.prev_edit(),
             _ => {}
         }
         Ok(false)
