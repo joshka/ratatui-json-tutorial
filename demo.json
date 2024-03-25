@@ -1,0 +1,13 @@
+{
+  "name": "john doe",
+  "age": 30,
+  "married": true,
+  "spouse": null,
+  "phone_numbers": ["123-456-7890", "123-456-7891"],
+  "address": {
+    "street": "1234 Main St",
+    "city": "Los Angeles",
+    "state": "CA",
+    "zip": "90001"
+  }
+}
