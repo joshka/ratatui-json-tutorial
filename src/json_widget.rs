@@ -145,7 +145,7 @@ impl<'a> TextVisitor<'a> {
     }
 
     fn push_line(&mut self) {
-        self.text.push_line(" ".repeat(self.indent).into())
+        self.text.push_line(" ".repeat(self.indent))
     }
 
     fn push_value<S: ToString>(&mut self, value: S, style: Style) {
